@@ -29,3 +29,9 @@ Build a low-latency pipeline to classify 4-class Motor Imagery signals using **C
 ```bash
 git clone [https://github.com/SEU_USUARIO/motor-imagery-bci.git](https://github.com/SEU_USUARIO/motor-imagery-bci.git)
 cd motor-imagery-bci
+```
+
+### 2. Install the Dependencies
+```bash
+pip install -r requirements.txt
+```
