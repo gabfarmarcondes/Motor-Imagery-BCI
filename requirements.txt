@@ -1,0 +1,26 @@
+# --- Core Data Science ---
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+
+# --- Neuroscience & Signal Processing ---
+mne>=1.6.0          # The core library for EEG loading and filtering
+pyriemann>=0.5.0    # (Optional) Specialized library for Covariance Geometry (great for CSP)
+
+# --- Classical Machine Learning ---
+scikit-learn>=1.3.0 # For the LDA Baseline classifier
+
+# --- Deep Learning (PyTorch) ---
+# Installs the CPU version by default. If you have an NVIDIA GPU, let me know.
+torch>=2.0.0
+torchvision>=0.15.0
+
+# --- Application & Interface ---
+pygame>=2.5.0       # For the Pong game environment
+pydirectinput       # For the future Minecraft integration
+
+# --- Development Tools ---
+ipykernel           # To run Jupyter Notebooks inside VS Code
+notebook            # Standard Jupyter interface
+black               # Code formatter (keeps your code professional)
