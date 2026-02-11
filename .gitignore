@@ -1,5 +1,6 @@
+venv/
+./venv
+__pycache__/
+
 notes
-venv
-data/raw
-BCI Competition 2008 – Graz data set A.pdf
-__pycache__
+data
