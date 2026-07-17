@@ -89,13 +89,13 @@ def run_baseline(subject_id: int):
     print(f"Chance Level: 25.00% (4 classes)")
     print(f"Confusion Matrix saved to: {save_path}")
 
-    return mean_score
+    return mean_score, std_score
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
     try:
         # Run baseline for Subject 1
-        acc = run_baseline(1)
+        acc, std = run_baseline(1)
         
         # Check Acceptance Criteria
         if acc > 0.65:

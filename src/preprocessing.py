@@ -15,7 +15,10 @@ def preprocessing_subject(subject_id: int, training: bool = True):
 
     # Call load_session to get the raw EEG data and the event mapping
     print(f"Loading Subject: {subject_id}")
-    raw, event_mapping = loader.load_session(subject_id, training=True)
+
+    # FIX: was hardcoded as 'training=True' which ignores meant this function ignored the training argument it receveid and always loaded the T (train) file.
+    # Now it actually respects the flag, so callers can request the E (eval) file
+    raw, event_mapping = loader.load_session(subject_id, training=training)
 
     # 3. Apply Notch Filter (50Hz)
     raw.notch_filter(50.0, picks='eeg', verbose=False)
