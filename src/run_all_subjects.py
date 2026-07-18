@@ -9,13 +9,13 @@ that were previously only printed to the console for a single subject.
 from pathlib import Path
 import pandas as pd
 
-from preprocessing import preprocessing_subject
+from preprocessing import preprocess_for_baseline, preprocess_for_deep_learning
 from baseline import run_baseline
 
 # BCI Competition IV 2a has exactly 9 subjcts, numbered 1 to 9
 ALL_SUBJECTS = range(1,10)
 
-def preprocess_all_subjects():
+def preprocess_all_subjects(preprocess_fn=preprocess_for_baseline):
     """
     Runs preprocessing_subject() for every subject
 
@@ -29,7 +29,7 @@ def preprocess_all_subjects():
     for subject_id in ALL_SUBJECTS:
         print(f"\nPreprocessing subject {subject_id}")
         try:
-            preprocessing_subject(subject_id, training=True)
+            preprocess_fn(subject_id, training=True)
             succeeded.append(subject_id)
         except Exception as e:
             print(f"\nFailed subject {subject_id}: {e}")
