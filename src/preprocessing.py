@@ -2,6 +2,7 @@ import mne
 import numpy as np
 from pathlib import Path
 from data_loader import DataLoader
+from artifact import get_artifact_trial_mask
 
 # Two preprocessing "profiles" are used in this project:
 # - CSP/LDA baseline: narrow band (8-30Hz), matches the mu/beta rhythms CSP relies on.
@@ -18,7 +19,8 @@ def preprocessing_subject(
         training: bool = True,
         l_freq: float = 8.0,
         h_freq: float = 30.0,
-        output_dir: str = "data/processed"
+        output_dir: str = "data/processed",
+        reject_artifacts: bool = True
         ):
     """
     Loads, filters, and epochs the data for a specific subject
@@ -30,6 +32,8 @@ def preprocessing_subject(
         h_freq = upper bandpass cutoff in Hz. Default 30.0 matches the CSP baseline
         output_dir = where to save the resulting .fif file. Use a different folder per processing profile
             (e.g. "data/processed" for CSP, "data/processed_dl for deep learning) so the two never overwrite each other
+        reject_artifacts: if True (default), drops trials flagged with the '1023' annotation before epoching. Kept as a toggle (not
+            hardcoded True), so the baseline can be re-run both ways for an explicit before/after comparison, per this feature's acceptance criteria
 
     Returns: epochs (mne.Epochs): the processed, epoched data
     """
@@ -73,6 +77,17 @@ def preprocessing_subject(
     # Finds timestamps where the arrows appeared on the screen.
     events, _ = mne.events_from_annotations(raw, event_id=annotation_map, verbose=False)
 
+    # Drop artifact-flagged trials before epoching, so mne.Epochs never sees them.
+    # events is already chronologically ordered by mne.events_from_annotations, and
+    # get_artifact_trial_mask() walks raw.annotations in the same chronological
+    # order over the same cue codes, so the mask lines up index-for-index with
+    # 'events' without any extra bookkeping
+    if reject_artifacts:
+         mask = get_artifact_trial_mask(raw)
+         n_rejected = int(mask.sum())
+         print(f"Rejecting {n_rejected}/{len(events)} trials flagged with artifacts")
+         events = events[~mask]
+
     # Map the dataset codes to clear names for our model
     event_id = {
         'Left Hand': 769,
@@ -106,38 +121,56 @@ def preprocessing_subject(
 
     return epochs
 
-def preprocess_for_baseline(subject_id: int, training: bool = True):
+def preprocess_for_baseline(
+        subject_id: int,
+        training: bool = True,
+        reject_artifacts: bool = True,
+        output_dir: str = "data/processed"
+        ):
     # CSP+LDA baseline profile: 8-30Hz, saved to data/processed/
+    #
+    # output_dir is overridable so a caller can run the SAME baseline profile into a
+    # throwaway folder (e.g. the with/without-rejection comparison in the smoke test
+    # below) without overwriting the real cache the rest of the pipeline reads from.
     return preprocessing_subject(
         subject_id,
         training=training,
         l_freq=8.0,
         h_freq=30.0,
-        output_dir="data/processed",
+        output_dir=output_dir,
+        reject_artifacts=reject_artifacts
     )
 
-def preprocess_for_deep_learning(subject_id: int, training: bool = True):
+def preprocess_for_deep_learning(subject_id: int, training: bool = True, reject_artifacts: bool = True):
     # EEGNet / deep learning profile: 4-40Hz, saved to data/processed_dl
-        return preprocessing_subject(
+    return preprocessing_subject(
         subject_id,
         training=training,
         l_freq=4.0,
         h_freq=40.0,
         output_dir="data/processed_dl",
+        reject_artifacts=reject_artifacts
     )
-    
+
+
 
 # test block
 if __name__ == "__main__":
     try:
-        # Smoke test: run both profiles for subject 1 and confirm they don't collide.
-        print("Baseline profile (8-30Hz -> data/processed)")
-        baseline_epochs = preprocess_for_baseline(1)
-        print(baseline_epochs)
+        print("Baseline profile with artifact rejecttion")
+        epochs_clean = preprocess_for_baseline(1)
+        print(epochs_clean)
 
-        print("\nDeep Learning profile (4-40Hz -> data/processed_dl)")
-        dl_epochs = preprocess_for_deep_learning(1)
-        print(dl_epochs)
+        print("Baseline profile without artifact rejecttion (for comparison)")
+        # Written to a throwaway folder on purpose: this is a diagnostic run, and
+        # data/processed/ must keep the artifact-rejected version that the CSP
+        # baseline (and results/baseline_results.csv) were built from.
+        epochs_raw = preprocess_for_baseline(
+            1,
+            reject_artifacts=False,
+            output_dir="data/processed_smoketest"
+        )
+        print(epochs_raw)
         
     except Exception as e:
         print(f"Error: {e}")
