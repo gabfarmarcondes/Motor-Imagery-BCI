@@ -168,7 +168,7 @@ def evaluate(model, data_loader, device):
     accuracy = float(np.mean(np.array(y_true) == np.array(y_pred)))
     return accuracy, y_true, y_pred
 
-def run_eegnet_cv(subject_id: int, epochs=150, batch_size=32, device=None):
+def run_eegnet_cv(subject_id: int, epochs=150, batch_size=32, device=None, lr=1e-3, patience=20):
     """
     Runs leave-one-run-out cross-validation for subject_id, mirroring
     baseline.py's role but with EEGNet + the run-based split instead of CSP+LDA + random ShuffleSplit
@@ -190,7 +190,7 @@ def run_eegnet_cv(subject_id: int, epochs=150, batch_size=32, device=None):
 
         # Fresh model per fold. Folds must stay independent
         model = EGGNet(n_channels=22, n_timepoints=dataset.X.shape[-1], n_classes=4)
-        model, val_acc = train_one_fold(model, train_loader, val_loader, device, epochs=epochs)
+        model, val_acc = train_one_fold(model, train_loader, val_loader, device, epochs=epochs, lr=lr, patience=patience)
 
         _, y_true, y_pred = evaluate(model, val_loader, device)
         fold_accuracies.append(val_acc)
