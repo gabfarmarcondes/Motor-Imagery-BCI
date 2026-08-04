@@ -1,123 +1,239 @@
 """
-Normalization strategy for EEGNet input.
+EEGNet (Lawhern et al., 2018) implementation adn training script
 
-Decision: Per-trial, per-channel z-score normalization. Each trial is normalized
-using only its own mean/std across time, per channel. No statistics are computed
-across trials, subjects, or folds.
-
-Why not per-subject or per-dataset normalization (i.e. fit mean/std once, on the training data, then apply to both train and val)? Because
-we're using a run-based leave-one-run-out split (see split.py): the training set is different for each of the 6 folds. Computing global stats
-over training data would mean recomputing them per fold, and any global stat computed from data overlapping with what a different fold considers
-validation is a subtle leakage risk. Per-trial normalization sidestep this entirely: it never looks outside the trial being normalized, so it's leakage-free
-by construction, at the cost of throwing away between-trial amplitude information (e.g. if a subject's signal drifts to lower amplitude over the session, 
-per-trial normalization erases that, an acceptable tradeoff here since CSP+LDA baseline already showed accuracy varies more by subject than by within-session
-drift)
-
-Raw MNE is in volts (~1e-5 scale), without this step EEGNet's weights would start updating from gradients computed on a tiny, poorly-scaled input, 
-which commonly prevents or slows convergence.
+Runs leave-one-run-out cross-validation (via split.py's run_based_splits) on the wideband pre-processed data
+(data/processed_dl), producing results comparable in formato to baseline.py's CSP+LDA output: per-fold accuracy, confusion matrix, saved to figures/.
 """
+
+from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+import torch.nn as nn
+from torch.utils.data import DataLoader as TorchDataLoader, Subset
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
-from data_loader import DataLoader as GDFLoader
-from split import get_motor_imagery_run_ids
+from eeg_dataset import MotorImageryDataset
+from split import run_based_splits
 
-# Maps the dataset's raw event codes to contiguos class indices.
-# nn.CrossEntropyLoss requires class labels in [0, num_classes], so 769-772
-# (MNE's event codes) must be remmaped, using then directly would either
-# chash or silently train against the wrong number of classes
-LABEL_REMAP = {769:0, 770:1, 771:2, 772:3}
-
-def zscore_per_trial(epochs_data: np.ndarray) -> np.ndarray:
+class EGGNet(nn.Module):
     """
-    Normalization each trial independently, channel by channel, using that
-    trial's own mean/std across the time axis.
+    PyTorch reimplementation of EEGNet (Lawhern et al., 2018, "EEGNet: A Compact Convolutional Network for EEG-based BCIs").
 
-    Args:
-        epochs_data: array of shape (n_trials, n_channels, n_timepoints),
-            e.g. from `epochs.get_data()
-        
-    Returns:
-        Normalized array, same shape, each (trial, channel) row with
-        mean ~0 and std ~1 across time.
+    Expects input shaped (batch, 1, n_channels, n_timepoints) matches what MotorImageryDataset already produces.
     """
 
-    # keepdims=True so broadcasting works directly againts the (trials, channels, time) array
-    mean = epochs_data.mean(axis=2, keepdims=True)
-    std = epochs_data.std(axis=2, keepdims=True)
+    def __init__(self, n_channels=22, n_timepoints=1126, n_classes=4,
+                 F1=8, D=2, F2=None, kernel_length=125, dropout_rate=0.5):
+        super().__init__()
+        F2 = F2 or F1 * D
 
-    # Guard against a flat/silent channel producing division by zero
-    std = np.where(std < 1e-8, 1e-8, std)
+        # Block 1: temporal filtering, then spatial (per-channel) filtering
+        self.block1_conv = nn.Conv2d(1, F1, (1, kernel_length), padding='same', bias=False)
+        self.block1_bn1 = nn.BatchNorm2d(F1)
 
-    return (epochs_data - mean) / std
+        #Depthwise conv: one spatial filter (across all 22 channels) per temporal
+        # filter (groups=F1). No padding, this collapses the channel dimension.
+        # from 22 down to 1 on purpose, it's the learned analogue of CSP
+        self.depthwise_conv = nn.Conv2d(F1, F1 * D, (n_channels, 1), groups=F1, bias=False)
+        self.block1_bn2 = nn.BatchNorm2d(F1 * D)
+        self.block1_pool = nn.AvgPool2d((1, 4))
+        self.block1_drop = nn.Dropout(dropout_rate)
 
-class MotorImageryDataset(Dataset):
+        # Block 2: separable conv (depthwise temporal + pointwise channel mix)
+        # Fewer parameters than a regular conv here. Important given how little
+        # data we have per subject (~240 training trials per fold)
+        self.sep_depthwise = nn.Conv2d(F1 * D, F1 * D, (1, 16), padding='same', groups=F1 * D, bias=False)
+        self.sep_pointwise = nn.Conv2d(F1 * D, F2, (1, 1), bias=False)
+        self.block2_bn = nn.BatchNorm2d(F2)
+        self.block2_pool = nn.AvgPool2d((1, 8))
+        self.block2_drop = nn.Dropout(dropout_rate)
+
+        self.elu = nn.ELU()
+
+        # Flattened feature size depends on n_timepoints via the two pooling layers.
+        # Computed once with a dummy forward pass instead of hardcoding a number
+        # that would silently go stale if n_timepoints ever changes.
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, n_channels, n_timepoints)
+            flattened_size = self._forward_features(dummy).view(1, -1).shape[1]
+
+        self.classifier = nn.Linear(flattened_size, n_classes)
+
+    def _forward_features(self, x):
+        x = self.block1_conv(x)
+        x = self.block1_bn1(x)
+        x = self.depthwise_conv(x)
+        x = self.block1_bn2(x)
+        x = self.elu(x)
+        x = self.block1_pool(x)
+        x = self.block1_drop(x)
+
+        x = self.sep_depthwise(x)
+        x = self.sep_pointwise(x)
+        x = self.block2_bn(x)
+        x = self.elu(x)
+        x = self.block2_pool(x)
+        x = self.block2_drop(x)
+        return x
+
+    def forward(self, x):
+        # Returns raw logits (no softmax); nn.CrossEntropyLoss applies it internally
+        x = self._forward_features(x)
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
+
+
+def apply_max_norm_constraint(module: nn.Module, max_norm:float):
     """
-    PyTorch Dataset for EEGNet training.
+    Manually enforces a max-norm weight constraint, matching the original KEras EEGNet's kernel_constraint=max_norm(...). Pytorch optimizers don't support
+    this natively. It must be called by hand after every optimizer.step().
 
-    Reads wideband epochs from data/processed_dl/ (see preprocess_for_deep_learning
-    in preprocessing.py), applies label remapping and per-trial normalization, and
-    exposes run_ids so this Dataset can be used directly with split.py's run_based_split()
-    via a SubsetRandomSampler or index-based Subset.
+    Rescales each output filter's weights so their L2 norm doesn't exceed max_norm; filters already within the limit are left untouched.
     """
+    with torch.no_grad():
+        w = module.weight
+        norm = w.norm(p=2, dim=tuple(range(1, w.dim())), keepdim=True)
+        desired = torch.clamp(norm, max=max_norm)
+        w *= desired / (norm + 1e-8)
 
-    def __init__(self, subject_id: int, training: bool = True):
-        from pathlib import Path
-        import mne
+def train_one_fold(model, train_loader, val_loader, device, epochs=150, lr=1e-3, patience=20):
+    """
+    Trains model, evaluating on val_loader, every epoch. Keeps the weights from whichever
+    epoch had the best validation accracy, and stops early if that hasn't improved
+    for patience epochs. With ~240 training trials, running a fixed large number of epochs
+    risks overfitting well past the useful point.
+    """
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
 
-        fif_path = Path("data/processed_dl") / f"subject_{subject_id}_epo.fif"
-        if not fif_path.exists():
-            raise FileNotFoundError(
-                f"{fif_path} not found. Run preprocess_for_deep_learning({subject_id} first.)"
-            )
+    best_val_acc = 0.0
+    best_state = None
+    epochs_without_improvement = 0
 
-        epochs = mne.read_epochs(fif_path, preload=True, verbose=False)
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
 
-        # Raw data: (n_trials, n_channels, n_timepoints), in volts
-        raw_data = epochs.get_data()
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
 
-        # Normalization BEFORE converting to tensor, keeps this testable/inspectable
-        # as plain numpy in the smoke test below
-        normalized_data = zscore_per_trial(raw_data)
+            # Applied after optimizer.step(), corrects whatever the gradient
+            # update just did, not before
+            apply_max_norm_constraint(model.depthwise_conv, max_norm=1.0)
+            apply_max_norm_constraint(model.classifier, max_norm=0.25)
 
-        # EEGNet expects (batch, 1, channel, time), add the 1 input channel
-        # dimension (analogus to a single-channel image)
-        self.X = torch.tensor(normalized_data, dtype=torch.float32).unsqueeze(1)
+            train_loss += loss.item() * X_batch.size(0)
 
-        # events[:, -1] holds the original 769-772 codes; remap to 0-3
-        event_codes = epochs.events[:, -1]
-        self.y = torch.tensor([LABEL_REMAP[code] for code in event_codes], dtype=torch.long)
+        train_loss /= len(train_loader.dataset)
+        val_acc, _, _ = evaluate(model, val_loader, device)
 
-        # Needed so a training script can build run-based folds directly from
-        # this Dataset without re-deriving run_ids separately. Requires the
-        # original raw session (not the cached epochs), see split.py's note
-        # on this dependency
-        loader = GDFLoader()
-        raw, _ = loader.load_session(subject_id, training=training)
-        self.run_ids = get_motor_imagery_run_ids(raw)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
-    def __len__(self):
-        return len(self.y)
+        if epoch % 20 == 0 or epoch == epochs - 1:
+            print(f"    epoch {epoch:3d}  train_loss={train_loss:.4f}  val_acc={val_acc:.4f}")
 
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        if epochs_without_improvement >= patience:
+            print(f"    early stopping at epoch {epoch} (no improvement for {patience} epochs)")
+            break
+
+    model.load_state_dict(best_state)
+    return model, best_val_acc
+
+def evaluate(model, data_loader, device):
+    # Returns (accuracy, y_true, y_pred) for data_loader
+    model.eval()
+    y_true, y_pred = [], []
+
+    with torch.no_grad():
+        for X_batch, y_batch in data_loader:
+            X_batch = X_batch.to(device)
+            outputs = model(X_batch)
+            preds = outputs.argmax(dim=1).cpu()
+            y_true.extend(y_batch.tolist())
+            y_pred.extend(preds.tolist())
+
+    accuracy = float(np.mean(np.array(y_true) == np.array(y_pred)))
+    return accuracy, y_true, y_pred
+
+def run_eegnet_cv(subject_id: int, epochs=150, batch_size=32, device=None):
+    """
+    Runs leave-one-run-out cross-validation for subject_id, mirroring
+    baseline.py's role but with EEGNet + the run-based split instead of CSP+LDA + random ShuffleSplit
+    """
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    dataset = MotorImageryDataset(subject_id=subject_id)
+    run_ids = dataset.run_ids
+
+    fold_accuracies = []
+    all_y_true, all_y_pred = [], []
+
+    for fold, (train_idx, val_idx) in enumerate(run_based_splits(run_ids)):
+        print(f"\n  Fold {fold} (val run {np.unique(run_ids[val_idx]).tolist()})")
+
+        train_loader = TorchDataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True)
+        val_loader = TorchDataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False)
+
+        # Fresh model per fold. Folds must stay independent
+        model = EGGNet(n_channels=22, n_timepoints=dataset.X.shape[-1], n_classes=4)
+        model, val_acc = train_one_fold(model, train_loader, val_loader, device, epochs=epochs)
+
+        _, y_true, y_pred = evaluate(model, val_loader, device)
+        fold_accuracies.append(val_acc)
+        all_y_true.extend(y_true)
+        all_y_pred.extend(y_pred)
+
+        print(f"  Fold {fold} best val_acc: {val_acc:.4f}")
+
+    mean_acc = float(np.mean(fold_accuracies))
+    std_acc = float(np.std(fold_accuracies))
+
+    save_confusion_matrix(all_y_true, all_y_pred, subject_id)
+
+    return mean_acc, std_acc, fold_accuracies
+
+
+def save_confusion_matrix(y_true, y_pred, subject_id):
+    # Saves a configuration matrix figure, same convention as baseline.py
+    figures_dir = Path("figures")
+    figures_dir.mkdir(exist_ok=True)
+
+    labels = ["Left Hand", "Right Hand", "Foot", "Tongue"]
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    disp.plot(cmap="Blues", xticks_rotation=45)
+    plt.title(f"EEGNet - Subject {subject_id} (leave-one-run-out), pooled folds")
+    plt.tight_layout()
+
+    save_path = figures_dir / f"eegnet_confusion_matrix_subject_{subject_id}.png"
+    plt.savefig(save_path)
+    plt.close()
+    print(f"  Confusion matrix saved to: {save_path}")
 
 
 # test block
 if __name__ == "__main__":
-    dataset = MotorImageryDataset(subject_id=1)
+    try:
+        mean_acc, std_acc, fold_accuracies = run_eegnet_cv(subject_id=1, epochs=150)
 
-    print(f"Dataset size: {len(dataset)} trials")
-    print(f"X shape: {dataset.X.shape}  (expected: [288, 1, 22, ~1126])")
-    print(f"y shape: {dataset.y.shape}, unique labels: {dataset.y.unique().tolist()}")
-    print(f"run_ids: {len(dataset.run_ids)} values, unique runs: {sorted(set(dataset.run_ids.tolist()))}")
+        print("\n--- EEGNet Summary (Subject 1) ---")
+        print(f"Per-fold accuracies: {[f'{a:.4f}' for a in fold_accuracies]}")
+        print(f"Mean accuracy: {mean_acc:.2%}  (std: {std_acc:.2%})")
+        print("CSP+LDA baseline for subject 1 was ~70.34% (see results/baseline_results.csv)")
 
-    # Sanity check: confirm normalization actually did what it claims to do.
-    # Pick one trial, one channel, check mean/std across time.
-    sample_trial, sample_channel = 0, 0
-    trial_signal = dataset.X[sample_trial, 0, sample_channel, :]
-    print(f"\nSanity check (trial {sample_trial}, channel {sample_channel}):")
-    print(f"  mean = {trial_signal.mean().item():.6f}  (expected: ~0.0)")
-    print(f"  std  = {trial_signal.std().item():.6f}  (expected: ~1.0)")
+    except Exception as e:
+        print(f"Error: {e}")
