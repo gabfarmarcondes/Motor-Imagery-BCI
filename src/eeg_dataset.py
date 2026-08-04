@@ -66,6 +66,7 @@ class MotorImageryDataset(Dataset):
     def __init__(self, subject_id: int, training: bool = True):
         from pathlib import Path
         import mne
+        from artifact import get_artifact_trial_mask
 
         fif_path = Path("data/processed_dl") / f"subject_{subject_id}_epo.fif"
         if not fif_path.exists():
@@ -91,12 +92,22 @@ class MotorImageryDataset(Dataset):
         self.y = torch.tensor([LABEL_REMAP[code] for code in event_codes], dtype=torch.long)
 
         # Needed so a training script can build run-based folds directly from
-        # this Dataset without re-deriving run_ids separately. Requires the
-        # original raw session (not the cached epochs), see split.py's note
-        # on this dependency
+        # this Dataset. run_ids is computed from the original raw session, so it
+        # must have the same artifact-rejection mask applied that was used when
+        # this subject's .fif was generated. Otherwise run_ids (288 entries)
+        # won't match self.y (fewer, post-rejection entries)
         loader = GDFLoader()
         raw, _ = loader.load_session(subject_id, training=training)
-        self.run_ids = get_motor_imagery_run_ids(raw)
+
+        run_ids_all_trials = get_motor_imagery_run_ids(raw)
+        artifact_mask = get_artifact_trial_mask(raw)
+        self.run_ids = run_ids_all_trials[~artifact_mask]
+
+        assert len(self.run_ids) == len(self.y), (
+            f"run_ids ({len(self.run_ids)}) and labels ({len(self.y)}) length "
+            f"mismatch -- check that this .fif was generated with the same "
+            f"artifact-rejection setting this Dataset assumes."
+        )
 
     def __len__(self):
         return len(self.y)
@@ -110,7 +121,9 @@ if __name__ == "__main__":
     dataset = MotorImageryDataset(subject_id=1)
 
     print(f"Dataset size: {len(dataset)} trials")
-    print(f"X shape: {dataset.X.shape}  (expected: [288, 1, 22, ~1126])")
+    # 273, not 288: subject 1 has 15 trials flagged with the '1023' artifact
+    # annotation, and preprocess_for_deep_learning drops them by default.
+    print(f"X shape: {dataset.X.shape}  (expected: [273, 1, 22, ~1126])")
     print(f"y shape: {dataset.y.shape}, unique labels: {dataset.y.unique().tolist()}")
     print(f"run_ids: {len(dataset.run_ids)} values, unique runs: {sorted(set(dataset.run_ids.tolist()))}")
 
