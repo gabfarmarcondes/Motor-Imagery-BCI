@@ -32,7 +32,14 @@ class DataLoader:
         
         Returns:
             raw (mne.io.Raw): The loaded and corrected Raw object.
-            events (dict): The events dictionary.
+            event_mapping (dict): STATIC label map, e.g. {'769': 'Left Hand', '...}. Not
+            the per-trial events array. This dict is the same regardless of which subject/session
+            was loaded. It's just human-readable names for the fixed set of event condes this dataset uses.
+
+            Callers that need per-trial event timestamps/codes (not just the label names)
+            should call mne.events_from_annotations() themselsves with ther own event_id filter.
+            See preprocessing.py and eeg_dataset.py, which both do this independently rather than
+            relying on a return value from this method.
         """
 
         # 1. Construct file path
@@ -69,6 +76,9 @@ class DataLoader:
         raw.set_montage(montage)
 
         # 6. Extract events
+        # NOTE: events here is only used to report a count in the print below.
+        # it is not returned. Callers needing the actual per-trial events array
+        # must call mne.eventts_from_annotations() themselves (see preprocessing.py)
         events, _ = mne.events_from_annotations(raw, verbose=False)
 
         print(f"Successfully loaded Subject {subject_id}. Found {len(events)} events.")
