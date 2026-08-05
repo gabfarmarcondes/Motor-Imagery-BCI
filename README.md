@@ -44,7 +44,7 @@ BNCI Horizon 2020).
   subject, before artifact rejection
 - **Sessions:** `A0{n}T.gdf` (training) and `A0{n}E.gdf` (evaluation)
 
-Raw data is **not versioned** in this repo (`data/` is gitignored) — see
+Raw data is **not versioned** in this repo (`data/` is gitignored), see
 [How to run](#7-how-to-run).
 
 ![Sensor Montage](figures/sensors_montage_subject_1.png)
@@ -125,7 +125,7 @@ channel, across time. No statistic is ever computed across trials, subjects, or
 folds, so this is leakage-free by construction. The CSP baseline feeds unnormalized
 epochs to CSP, which handles scaling through its own covariance estimation.
 
-**Cross-validation — and an important caveat.** The two methods were *not*
+**Cross-validation and an important caveat.** The two methods were *not*
 evaluated under the same scheme:
 
 - **EEGNet and the final models** use a **run-based split** (leave-one-run-out via
@@ -143,7 +143,7 @@ comparison should be read (see below).
 
 **Evaluation session (E) is not used.** Every number reported here comes from the
 **training session** (`A0{n}T.gdf`) only. The evaluation session (`A0{n}E.gdf`)
-ships without class labels — they were released separately after the original 2008
+ships without class labels, they were released separately after the original 2008
 competition. This is a **known limitation, not an oversight**: there is no fully
 independent held-out test set in the traditional sense, and these numbers should
 not be compared directly against published work that does use session E labels.
@@ -194,7 +194,7 @@ comparison would likely narrow the baseline's numbers, not EEGNet's.
 The other consistent finding is that **subject variability dwarfs method
 variability**. The spread across subjects (33.6% to 73.6%) is far larger than the
 spread between methods on any single subject. Subjects 4, 5, and 6 sit close to
-chance for both methods — a well-documented "BCI illiteracy" pattern in this
+chance for both methods, a well-documented "BCI illiteracy" pattern in this
 dataset, not something either classifier fixed.
 
 ### Final per-subject models
@@ -212,12 +212,12 @@ run rather than averaged over six.
 
 ![EEGNet confusion matrix, subject 9](figures/eegnet_confusion_matrix_subject_9.png)
 
-*Subject 9, EEGNet, pooled across all 6 leave-one-run-out folds — the strongest
+*Subject 9, EEGNet, pooled across all 6 leave-one-run-out folds, the strongest
 EEGNet result (73.6%). All four classes are usable.*
 
 ![EEGNet confusion matrix, subject 7](figures/eegnet_confusion_matrix_subject_7.png)
 
-*Subject 7, EEGNet (45.1%) — the one subject where CSP+LDA wins meaningfully
+*Subject 7, EEGNet (45.1%), the one subject where CSP+LDA wins meaningfully
 (66.9%). Included deliberately as the project's clearest negative result: the same
 architecture and hyperparameters that work on subject 9 do not transfer here.*
 
@@ -246,7 +246,7 @@ the model was trained on and inflate the displayed live accuracy to around 92%,
 versus the ~69% the model genuinely achieves on unseen data for subject 8. The
 panel's "Live acc" therefore converges toward the model's real held-out accuracy,
 and the panel labels this explicitly with "Replaying held-out run". The cost is a
-small pool — 45 trials for subject 8, which cycles and reshuffles.
+small pool, 45 trials for subject 8, which cycles and reshuffles.
 
 | Key | Action |
 |---|---|
@@ -264,11 +264,11 @@ smoke-tested headlessly with `python src/game_engine.py`.
 
 ```
 ├── data/
-│   ├── raw/              # A0{1-9}{T,E}.gdf — not versioned, see below
+│   ├── raw/              # A0{1-9}{T,E}.gdf not versioned, see below
 │   ├── processed/        # 8-30 Hz epochs (CSP baseline)
 │   └── processed_dl/     # 4-40 Hz epochs (EEGNet)
 ├── figures/              # Confusion matrices, sensor montage
-├── models/               # subject_{n}_eegnet.pt — trained weights + metadata
+├── models/               # subject_{n}_eegnet.pt trained weights + metadata
 ├── results/              # baseline / eegnet / comparison / final model CSVs
 ├── notes/                # Working notes on the dataset
 └── src/                  # Pipeline (see table in Pipeline section)
