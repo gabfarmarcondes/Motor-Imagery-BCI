@@ -17,7 +17,7 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from eeg_dataset import MotorImageryDataset
 from split import run_based_splits
 
-class EGGNet(nn.Module):
+class EEGNet(nn.Module):
     """
     PyTorch reimplementation of EEGNet (Lawhern et al., 2018, "EEGNet: A Compact Convolutional Network for EEG-based BCIs").
 
@@ -189,7 +189,7 @@ def run_eegnet_cv(subject_id: int, epochs=150, batch_size=32, device=None, lr=1e
         val_loader = TorchDataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False)
 
         # Fresh model per fold. Folds must stay independent
-        model = EGGNet(n_channels=22, n_timepoints=dataset.X.shape[-1], n_classes=4)
+        model = EEGNet(n_channels=22, n_timepoints=dataset.X.shape[-1], n_classes=4)
         model, val_acc = train_one_fold(model, train_loader, val_loader, device, epochs=epochs, lr=lr, patience=patience)
 
         _, y_true, y_pred = evaluate(model, val_loader, device)
